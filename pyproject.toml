@@ -11,6 +11,9 @@ dependencies = [
     "python-constraint>=1.4.0",
 ]
 
+[project.optional-dependencies]
+render = ["playwright>=1.47"]
+
 [project.scripts]
 laya-murdle = "laya_murdle.main:main"
 

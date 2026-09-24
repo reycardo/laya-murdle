@@ -32,22 +32,42 @@ uv sync
 `uv sync` creates `.venv/` and installs all dependencies from `pyproject.toml` /
 `uv.lock`.
 
+To fetch the live puzzle, also install the headless browser used to render it:
+
+```bash
+uv sync --extra render
+uv run playwright install chromium
+```
+
 ## Usage
 
 ```bash
 uv run laya-murdle --sample          # built-in puzzle, good for a smoke test
-uv run laya-murdle                   # fetch https://murdle.com
+uv run laya-murdle --render          # today's murdle, rendered in headless Chromium
+uv run laya-murdle --file puzzle.html  # a page you saved yourself
 uv run laya-murdle --url <puzzle-url>
-uv run laya-murdle --file puzzle.txt # or a saved .html page
 uv run laya-murdle --no-preload      # lazy-load the Laya checkpoints
 ```
 
 The command prints the parsed categories, each clue as Laya classified it (with its
 probability), and the solution found by the constraint solver.
 
-murdle.com builds its puzzle in the browser, so a plain HTTP fetch often returns no
-puzzle text. When that happens, save the rendered page (or paste the puzzle into a
-`.txt` file) and pass it with `--file`.
+### Why a plain fetch does not work
+
+murdle.com ships an empty shell and generates the puzzle in the browser ("PLEASE WAIT
+WHILE THE DAILY MURDLE IS GENERATED"), so `httpx.get` returns no suspects and no clues.
+You need the *rendered* DOM. Two ways to get it:
+
+- `--render` runs the page in headless Chromium and waits for the clue list.
+- `--file` takes a page you saved yourself. In Chrome or Edge, open murdle.com, wait
+  for the puzzle to appear, then either use **File → Save Page As… → Webpage, Complete**,
+  or open DevTools and run `copy(document.documentElement.outerHTML)` in the console and
+  paste the result into `puzzle.html`. (Safari's `.webarchive` format will not work.)
+
+Once rendered, the puzzle is read straight from the DOM: every category member appears
+in the accusation dropdowns (`select#suspect`, `#weapon`, `#room`, `#motive`) and the
+clues are the bullets inside `#evidence`. A plain `.txt` file with `SUSPECTS` /
+`WEAPONS` / `LOCATIONS` / `CLUES` headings also works.
 
 To pre-download the Laya checkpoints instead of lazy-loading them on the first
 question:
@@ -110,6 +130,30 @@ A well-formed murdle has exactly one solution. If the clue set is contradictory 
 solver retries after dropping the least confident clues (up to two), and reports which
 ones it dropped — those are the clues Laya most likely misread.
 
+### The awkward clue types
+
+The daily murdle does not only use plain "X was in Y" clues:
+
+- **Card-attribute clues** ("a medium-weight weapon", "a bald suspect", "grey eyes",
+  "a drafty room") name a *property* rather than a member. `--render` scrapes the card
+  data out of the page's own script scope (`suspect_details`, `major_setting.weapons`,
+  `major_setting.rooms`) and turns it into an attribute vocabulary, so "medium-weight"
+  resolves to the set of weapons with `weight == "medium"`. Every clue side is
+  therefore a *set* of members, and a pairing means "some suspect matches both sides".
+- **Fingerprint clues** ("This fingerprint was found in the gift shop") are resolved by
+  opening the fingerprint evidence page, reading the discovered print image and
+  matching it against each suspect's `print` characteristic; the clue text is rewritten
+  to name that suspect before Laya sees it.
+- **Exclusive-or clues** ("Either … or … (but not both!)") are split on `either … or`
+  and become a real XOR constraint over the two alternative pairings. Laya is not asked
+  about these — the structure is explicit.
+- **Third-party clues** ("Uncle Midnight was flirting with the person who had a
+  chainsaw") imply that Midnight is *not* that person. A named suspect plus a
+  third-party phrase ("the person who", "whoever", …) is treated like a negation cue.
+
+Attribute clues need the scraped card data, so they only work with `--render`. With
+`--file` or a plain `.txt` puzzle they are reported as skipped.
+
 ## Development
 
 ```bash
@@ -124,3 +168,15 @@ uv run <command>   # run anything inside the project environment
   polling the site.
 - Laya is a young project and its API may change; pin the version in `pyproject.toml`
   if you hit breakage.
+
+## Limitations
+
+- Attribute clues depend on the card data scraped by `--render`; without it they are
+  skipped and the puzzle usually stays underconstrained.
+- The attribute vocabulary is derived from the card fields (weight, materials, hair,
+  eyes, handedness, star sign, room feature, …). A murdle phrasing that uses a property
+  not covered there will be skipped rather than misread.
+- Comparative and ordering clues ("taller than", "north of") are not modelled, beyond
+  "tallest" and "shortest".
+- The murder-scene clue ("the body was found beneath some housing flyers") is ignored;
+  it identifies the scene, not a grid pairing.

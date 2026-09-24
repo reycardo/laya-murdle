@@ -29,6 +29,14 @@ CLUE_HEADERS = ("clues", "the detective's notes", "detective's notes", "notes")
 
 QUESTION_MARKERS = ("who", "whodunit", "accuse", "murderer")
 
+# murdle.com lists every category member in the accusation dropdowns at the bottom.
+ACCUSATION_SELECTS = {
+    "suspect": "suspects",
+    "weapon": "weapons",
+    "room": "locations",
+    "motive": "motives",
+}
+
 # The category whose members the other categories are assigned to.
 PEOPLE_CATEGORY = "suspects"
 
@@ -37,6 +45,27 @@ NEGATION_CUE = re.compile(
     r"other than|away from|avoid(?:s|ed)?|ruled out)\b",
     re.IGNORECASE,
 )
+
+# "X was flirting with the person who had Y" means X is *not* that person.
+THIRD_PARTY_CUE = re.compile(
+    r"\b(?:the person who|the suspect who|the one who|the individual who|whoever)\b",
+    re.IGNORECASE,
+)
+
+XOR_CLUE = re.compile(r"\beither\b(?P<first>.+?)\bor\b(?P<second>.+)", re.IGNORECASE)
+XOR_MARKER = re.compile(r"but not both", re.IGNORECASE)
+
+# Attribute words that murdle clues use in place of a member name, per category.
+ROLE_TERMS = {
+    "clergy": ("clergy", "religious"),
+    "business": ("business",),
+    "government": ("government", "politician"),
+    "education": ("education", "educator", "teacher"),
+    "army": ("army", "military", "soldier"),
+    "noble": ("noble", "nobility", "royal"),
+}
+
+FEATURE_PREFIXES = ("in", "at", "on", "by", "beneath", "under", "near", "a", "an", "the", "some")
 
 # Laya is strongly biased towards one option for any single phrasing, so each clue is
 # probed with several claim wordings (one inverted) and the results are averaged.
@@ -80,16 +109,34 @@ Dr. Crimson was not in the Library.
 class Puzzle:
     categories: dict[str, list[str]] = field(default_factory=dict)
     clues: list[str] = field(default_factory=list)
+    # category -> member -> raw attributes scraped from the page's card data
+    details: dict[str, dict[str, dict]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Mention:
+    """One side of a clue: a named member, or every member matching an attribute."""
+
+    category: str
+    members: frozenset[str]
+    label: str
+    named: bool
+
+
+@dataclass(frozen=True)
+class Pairing:
+    left: Mention
+    right: Mention
 
 
 @dataclass
 class Clue:
     text: str
-    left: tuple[str, str]
-    right: tuple[str, str]
+    pairings: list[Pairing]
     positive: bool
     confidence: float
-    negation_cue: bool
+    cues: list[str]
+    kind: str = "pair"
 
 
 def fetch_puzzle_html(url: str = MURDLE_URL, timeout: float = 20.0) -> str:
@@ -98,11 +145,131 @@ def fetch_puzzle_html(url: str = MURDLE_URL, timeout: float = 20.0) -> str:
     return response.text
 
 
+EXTRACT_JS = """() => {
+  const selects = {suspect: 'suspects', weapon: 'weapons', room: 'locations', motive: 'motives'};
+  const categories = {};
+  for (const [id, category] of Object.entries(selects)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const members = Array.from(el.options).slice(1).map(o => o.textContent.trim());
+    if (members.length) categories[category] = members;
+  }
+
+  const clues = Array.from(document.querySelectorAll('#evidence strong'))
+    .map(s => s.textContent.replace(/\\s+/g, ' ').replace(/^\\u2022\\s*/, '').trim())
+    .filter(Boolean);
+
+  // The card attributes live in the page's own script scope, not on window.
+  const details = {suspects: {}, weapons: {}, locations: {}};
+  try {
+    (categories.suspects || []).forEach(name => {
+      const found = suspect_details[name];
+      if (found) details.suspects[name] = found.characteristics;
+    });
+  } catch (e) {}
+  try {
+    major_setting.weapons.forEach(w => {
+      if ((categories.weapons || []).includes(w.name)) {
+        details.weapons[w.name] = {weight: w.weight, materials: w.materials, method: w.method, clue: w.clue};
+      }
+    });
+  } catch (e) {}
+  try {
+    major_setting.rooms.forEach(r => {
+      if ((categories.locations || []).includes(r.name)) {
+        details.locations[r.name] = {feature: r.feature, indoors: r.indoors};
+      }
+    });
+  } catch (e) {}
+
+  return {categories, clues, details};
+}"""
+
+FOUND_PRINT_JS = """() => {
+  const src = Array.from(document.querySelectorAll('img'))
+    .map(i => i.getAttribute('src') || '')
+    .find(s => s.startsWith('prints/'));
+  return src || null;
+}"""
+
+
+def render_puzzle(url: str = MURDLE_URL, timeout: float = 60.0) -> Puzzle:
+    """Load the page in a headless browser so the client-side puzzle is generated."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise SystemExit(
+            "--render needs Playwright:\n"
+            "  uv sync --extra render\n"
+            "  uv run playwright install chromium"
+        ) from exc
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            page.wait_for_selector("#evidence p strong", timeout=timeout * 1000)
+            payload = page.evaluate(EXTRACT_JS)
+            owner = _resolve_fingerprint(page, payload["details"].get("suspects", {}))
+        finally:
+            browser.close()
+
+    clues = payload["clues"]
+    if owner:
+        clues = [re.sub(r"This fingerprint", f"{owner}'s fingerprint", c) for c in clues]
+
+    return Puzzle(categories=payload["categories"], clues=clues, details=payload["details"])
+
+
+def _resolve_fingerprint(page, suspects: dict[str, dict]) -> str | None:
+    """Open the fingerprint evidence page and match the print against the suspects."""
+    link = page.query_selector("#evidence object a")
+    if not link:
+        return None
+    link.click()
+    page.wait_for_timeout(1000)
+    found = page.evaluate(FOUND_PRINT_JS)
+    if not found:
+        return None
+    filename = found.rsplit("/", 1)[-1]
+    for name, characteristics in suspects.items():
+        if characteristics.get("print") == filename:
+            return name
+    return None
+
+
 def html_to_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
     return soup.get_text("\n")
+
+
+def parse_murdle_dom(html: str) -> Puzzle | None:
+    """Read a rendered murdle page: the category members live in the accusation dropdowns."""
+    soup = BeautifulSoup(html, "html.parser")
+    puzzle = Puzzle()
+
+    for select_id, category in ACCUSATION_SELECTS.items():
+        select = soup.find("select", id=select_id)
+        if not select:
+            continue
+        # The first option is the placeholder label ("WHO?", "HOW?", ...).
+        members = [option.get_text(strip=True) for option in select.find_all("option")[1:]]
+        if members:
+            puzzle.categories[category] = members
+
+    evidence = soup.find(id="evidence")
+    if evidence:
+        for bullet in evidence.find_all("strong"):
+            text = re.sub(r"\s+", " ", bullet.get_text(" ", strip=True)).lstrip("• ").strip()
+            if text:
+                puzzle.clues.append(text)
+
+    if puzzle.categories.get(PEOPLE_CATEGORY) and puzzle.clues:
+        return puzzle
+    return None
 
 
 def _looks_like_item(line: str) -> bool:
@@ -151,23 +318,136 @@ def parse_puzzle(text: str) -> Puzzle:
     return puzzle
 
 
-def find_mentions(clue: str, categories: dict[str, list[str]]) -> list[tuple[str, str]]:
-    """Return (category, member) pairs mentioned in the clue, in order of appearance."""
+def _strip_feature(feature: str) -> str:
+    words = feature.lower().split()
+    while words and words[0] in FEATURE_PREFIXES:
+        words.pop(0)
+    return " ".join(words)
+
+
+def suspect_terms(name: str, characteristics: dict) -> list[str]:
+    terms = []
+    hair = characteristics.get("hair")
+    if hair == "no":
+        terms.append("bald")
+    elif hair:
+        terms += [f"{hair} hair", f"{hair}-haired"]
+    eyes = characteristics.get("eyes")
+    if eyes:
+        terms += [f"{eyes} eyes", f"{eyes}-eyed"]
+    hand = characteristics.get("hand")
+    if hand:
+        terms += [f"{hand}-handed", f"{hand} handed"]
+    if characteristics.get("sign"):
+        terms.append(characteristics["sign"])
+    if characteristics.get("element"):
+        terms.append(f"{characteristics['element']} sign")
+    for key, words in ROLE_TERMS.items():
+        if characteristics.get(key):
+            terms += list(words)
+    if characteristics.get("feature"):
+        terms.append(_strip_feature(characteristics["feature"]))
+    return terms
+
+
+def weapon_terms(details: dict) -> list[str]:
+    terms = []
+    weight = details.get("weight")
+    if weight:
+        terms += [f"{weight}-weight", f"{weight} weight"]
+    terms += [m for m in details.get("materials") or []]
+    terms += [m for m in details.get("method") or []]
+    if details.get("clue"):
+        terms.append(_strip_feature(details["clue"]))
+    return terms
+
+
+def location_terms(details: dict) -> list[str]:
+    terms = []
+    if details.get("feature"):
+        terms.append(_strip_feature(details["feature"]))
+    terms.append("indoors" if details.get("indoors") else "outdoors")
+    return terms
+
+
+def build_attribute_index(puzzle: Puzzle) -> dict[str, dict[str, frozenset[str]]]:
+    """Map an attribute phrase to every member of a category that has it."""
+    builders = {
+        "suspects": lambda name, detail: suspect_terms(name, detail),
+        "weapons": lambda name, detail: weapon_terms(detail),
+        "locations": lambda name, detail: location_terms(detail),
+    }
+
+    index: dict[str, dict[str, set[str]]] = {}
+    for category, builder in builders.items():
+        members = puzzle.details.get(category) or {}
+        for name, detail in members.items():
+            for term in builder(name, detail):
+                term = term.strip().lower()
+                if term:
+                    index.setdefault(category, {}).setdefault(term, set()).add(name)
+
+    heights = {
+        name: detail.get("height")
+        for name, detail in (puzzle.details.get("suspects") or {}).items()
+        if detail.get("height")
+    }
+    if len(heights) > 1:
+        ordered = sorted(heights, key=lambda name: int(heights[name]))
+        index.setdefault("suspects", {}).setdefault("shortest", set()).add(ordered[0])
+        index.setdefault("suspects", {}).setdefault("tallest", set()).add(ordered[-1])
+
+    return {
+        category: {term: frozenset(names) for term, names in terms.items()}
+        for category, terms in index.items()
+    }
+
+
+def find_mentions(
+    clue: str,
+    categories: dict[str, list[str]],
+    attributes: dict[str, dict[str, frozenset[str]]] | None = None,
+) -> list[Mention]:
+    """Find every member or attribute group the clue refers to, in order of appearance."""
     lowered = clue.lower()
-    mentions: list[tuple[int, str, str]] = []
+    hits: list[tuple[int, int, Mention]] = []
+
     for category, members in categories.items():
         for member in members:
             index = lowered.find(member.lower())
             if index >= 0:
-                mentions.append((index, category, member))
-    mentions.sort()
-    seen: set[tuple[str, str]] = set()
-    ordered: list[tuple[str, str]] = []
-    for _, category, member in mentions:
-        if (category, member) not in seen:
-            seen.add((category, member))
-            ordered.append((category, member))
+                hits.append(
+                    (index, -len(member), Mention(category, frozenset({member}), member, True))
+                )
+
+    for category, terms in (attributes or {}).items():
+        for term, members in terms.items():
+            match = re.search(rf"\b{re.escape(term)}\b", lowered)
+            if match:
+                hits.append(
+                    (match.start(), -len(term), Mention(category, members, term, False))
+                )
+
+    hits.sort(key=lambda hit: (hit[0], hit[1]))
+
+    ordered: list[Mention] = []
+    taken: set[tuple[str, frozenset[str]]] = set()
+    for _, _, mention in hits:
+        key = (mention.category, mention.members)
+        if key not in taken:
+            taken.add(key)
+            ordered.append(mention)
     return ordered
+
+
+def first_pairing(mentions: list[Mention]) -> Pairing | None:
+    if not mentions:
+        return None
+    left = mentions[0]
+    for right in mentions[1:]:
+        if right.category != left.category:
+            return Pairing(left, right)
+    return None
 
 
 def score_pairing(clue: str, a: str, b: str, router) -> float:
@@ -184,30 +464,72 @@ def score_pairing(clue: str, a: str, b: str, router) -> float:
     return sum(scores) / len(scores)
 
 
+def split_xor(
+    clue: str,
+    categories: dict[str, list[str]],
+    attributes: dict[str, dict[str, frozenset[str]]],
+) -> list[Pairing] | None:
+    """Split 'Either A or B (but not both!)' into its two alternative pairings."""
+    if not XOR_MARKER.search(clue):
+        return None
+    match = XOR_CLUE.search(clue)
+    if not match:
+        return None
+
+    whole = find_mentions(clue, categories, attributes)
+    pairings = []
+    for half in (match.group("first"), match.group("second")):
+        mentions = find_mentions(half, categories, attributes)
+        # A half often drops the shared subject ("...or brought a laptop").
+        seen = {mention.category for mention in mentions}
+        mentions += [mention for mention in whole if mention.category not in seen]
+        pairing = first_pairing(mentions)
+        if not pairing:
+            return None
+        pairings.append(pairing)
+    return pairings
+
+
 def classify_clues(puzzle: Puzzle, router) -> tuple[list[Clue], list[str]]:
-    """Turn each clue into a positive or negative pairing of two category members."""
+    """Turn each clue into pairings of members, with a polarity decided by Laya."""
+    attributes = build_attribute_index(puzzle)
     parsed: list[Clue] = []
     skipped: list[str] = []
 
-    for clue in puzzle.clues:
-        mentions = find_mentions(clue, puzzle.categories)
-        if len(mentions) < 2 or mentions[0][0] == mentions[1][0]:
-            skipped.append(clue)
+    for text in puzzle.clues:
+        alternatives = split_xor(text, puzzle.categories, attributes)
+        if alternatives:
+            parsed.append(
+                Clue(text=text, pairings=alternatives, positive=True, confidence=1.0,
+                     cues=["xor"], kind="xor")
+            )
             continue
 
-        left, right = mentions[0], mentions[1]
-        score = score_pairing(clue, left[1], right[1], router)
-        negated = bool(NEGATION_CUE.search(clue))
-        positive = score >= (NEGATED_OVERRIDE if negated else AFFIRMED_FLOOR)
+        mentions = find_mentions(text, puzzle.categories, attributes)
+        pairing = first_pairing(mentions)
+        if not pairing:
+            skipped.append(text)
+            continue
 
+        score = score_pairing(text, pairing.left.label, pairing.right.label, router)
+
+        cues = []
+        if NEGATION_CUE.search(text):
+            cues.append("negation")
+        if THIRD_PARTY_CUE.search(text) and any(
+            mention.named and mention.category == PEOPLE_CATEGORY
+            for mention in (pairing.left, pairing.right)
+        ):
+            cues.append("third-party")
+
+        positive = score >= (NEGATED_OVERRIDE if cues else AFFIRMED_FLOOR)
         parsed.append(
             Clue(
-                text=clue,
-                left=left,
-                right=right,
+                text=text,
+                pairings=[pairing],
                 positive=positive,
                 confidence=score if positive else 1.0 - score,
-                negation_cue=negated,
+                cues=cues,
             )
         )
 
@@ -216,6 +538,32 @@ def classify_clues(puzzle: Puzzle, router) -> tuple[list[Clue], list[str]]:
 
 def _var(category: str, person: str) -> str:
     return f"{category}::{person}"
+
+
+def _pairing_predicate(pairing: Pairing, people: list[str]):
+    """Variables plus a test for 'some suspect satisfies both sides of this pairing'."""
+    left, right = pairing.left, pairing.right
+
+    if PEOPLE_CATEGORY in (left.category, right.category):
+        persons, other = (left, right) if left.category == PEOPLE_CATEGORY else (right, left)
+        names = [person for person in people if person in persons.members]
+        if not names or other.category == PEOPLE_CATEGORY:
+            return None
+        variables = [_var(other.category, person) for person in names]
+
+        def holds(values, wanted=other.members):
+            return any(value in wanted for value in values)
+
+        return variables, holds
+
+    variables = [_var(left.category, person) for person in people]
+    variables += [_var(right.category, person) for person in people]
+    count = len(people)
+
+    def holds(values, a=left.members, b=right.members, n=count):
+        return any(values[i] in a and values[n + i] in b for i in range(n))
+
+    return variables, holds
 
 
 def build_problem(puzzle: Puzzle, clues: list[Clue]) -> tuple[Problem, list[str]]:
@@ -233,33 +581,27 @@ def build_problem(puzzle: Puzzle, clues: list[Clue]) -> tuple[Problem, list[str]
         problem.addConstraint(AllDifferentConstraint(), variables)
 
     for clue in clues:
-        left_cat, right_cat = clue.left[0], clue.right[0]
-
-        if PEOPLE_CATEGORY in (left_cat, right_cat):
-            if left_cat == PEOPLE_CATEGORY:
-                person, (category, value) = clue.left[1], clue.right
-            else:
-                person, (category, value) = clue.right[1], clue.left
-            problem.addConstraint(
-                lambda got, want=value, holds=clue.positive: (got == want) is holds,
-                [_var(category, person)],
-            )
+        predicates = [_pairing_predicate(pairing, people) for pairing in clue.pairings]
+        if any(predicate is None for predicate in predicates):
             continue
 
-        left_vars = [_var(left_cat, person) for person in people]
-        right_vars = [_var(right_cat, person) for person in people]
+        if clue.kind == "xor":
+            (vars_a, holds_a), (vars_b, holds_b) = predicates
+            union = list(dict.fromkeys(vars_a + vars_b))
+            index_a = [union.index(name) for name in vars_a]
+            index_b = [union.index(name) for name in vars_b]
 
-        def pairing(
-            *values,
-            a=clue.left[1],
-            b=clue.right[1],
-            n=len(people),
-            holds=clue.positive,
-        ):
-            matched = any(values[i] == a and values[n + i] == b for i in range(n))
-            return matched is holds
+            def exclusive(*values, ia=index_a, ib=index_b, ha=holds_a, hb=holds_b):
+                return ha([values[i] for i in ia]) != hb([values[i] for i in ib])
 
-        problem.addConstraint(pairing, left_vars + right_vars)
+            problem.addConstraint(exclusive, union)
+            continue
+
+        variables, holds = predicates[0]
+        problem.addConstraint(
+            lambda *values, test=holds, want=clue.positive: test(values) is want,
+            variables,
+        )
 
     return problem, people
 
@@ -288,13 +630,41 @@ def format_solution(solution: dict[str, str], people: list[str]) -> str:
     return "\n".join(lines)
 
 
-def load_text(args: argparse.Namespace) -> str:
+def load_puzzle(args: argparse.Namespace) -> Puzzle:
     if args.sample:
-        return SAMPLE_PUZZLE
+        return parse_puzzle(SAMPLE_PUZZLE)
+
+    if args.render and not args.file:
+        return render_puzzle(args.url)
+
     if args.file:
         raw = Path(args.file).read_text(encoding="utf-8")
-        return html_to_text(raw) if args.file.endswith((".html", ".htm")) else raw
-    return html_to_text(fetch_puzzle_html(args.url))
+        if not args.file.endswith((".html", ".htm")):
+            return parse_puzzle(raw)
+    else:
+        raw = fetch_puzzle_html(args.url)
+
+    return parse_murdle_dom(raw) or parse_puzzle(html_to_text(raw))
+
+
+def describe(clue: Clue) -> str:
+    cues = f" ({', '.join(clue.cues)})" if clue.cues else ""
+    if clue.kind == "xor":
+        pairs = " XOR ".join(
+            f"{pairing.left.label} = {pairing.right.label}" for pairing in clue.pairings
+        )
+        return f"  [xor ] {pairs}{cues}  <- {clue.text}"
+    pairing = clue.pairings[0]
+    relation = "=" if clue.positive else "!="
+    left, right = pairing.left, pairing.right
+    detail = ""
+    for mention in (left, right):
+        if not mention.named:
+            detail += f"  [{mention.label} -> {', '.join(sorted(mention.members))}]"
+    return (
+        f"  [{clue.confidence:.2f}] {left.label} {relation} {right.label}{cues}"
+        f"  <- {clue.text}{detail}"
+    )
 
 
 def main() -> None:
@@ -303,19 +673,26 @@ def main() -> None:
     parser.add_argument("--file", help="local .html or .txt puzzle instead of fetching")
     parser.add_argument("--sample", action="store_true", help="use the built-in puzzle")
     parser.add_argument(
+        "--render",
+        action="store_true",
+        help="render the page with headless Chromium (needs the 'render' extra)",
+    )
+    parser.add_argument(
         "--no-preload",
         action="store_true",
         help="lazy-load Laya checkpoints instead of preloading them",
     )
     args = parser.parse_args()
 
-    puzzle = parse_puzzle(load_text(args))
+    puzzle = load_puzzle(args)
 
     if not puzzle.categories.get(PEOPLE_CATEGORY) or not puzzle.clues:
         print(
-            "Could not find suspects and clues in the page text. murdle.com renders its\n"
-            "puzzle in the browser, so save the rendered page and pass it with --file,\n"
-            "or try --sample to check the pipeline.",
+            "Could not find suspects and clues. murdle.com builds the puzzle in the\n"
+            "browser, so a plain HTTP fetch returns an empty shell. Either:\n"
+            "  uv run laya-murdle --render          (headless Chromium)\n"
+            "  uv run laya-murdle --file puzzle.html  (a page you saved yourself)\n"
+            "  uv run laya-murdle --sample          (check the pipeline offline)",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -332,12 +709,7 @@ def main() -> None:
 
     print("\nClassified clues:")
     for clue in clues:
-        relation = "=" if clue.positive else "!="
-        cue = " (negation cue)" if clue.negation_cue else ""
-        print(
-            f"  [{clue.confidence:.2f}] {clue.left[1]} {relation} {clue.right[1]}{cue}"
-            f"  <- {clue.text}"
-        )
+        print(describe(clue))
     for text in skipped:
         print(f"  [skipped] {text}")
 
