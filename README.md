@@ -154,6 +154,25 @@ The daily murdle does not only use plain "X was in Y" clues:
 Attribute clues need the scraped card data, so they only work with `--render`. With
 `--file` or a plain `.txt` puzzle they are reported as skipped.
 
+### Naming the murderer
+
+The last clue is not a grid clue: it says where the body was found, or what killed the
+victim ("One of the locals's body was found beneath some housing flyers"). It resolves
+to exactly one member — here the real estate office — and gives no pairing, so it falls
+out of the clue loop as skipped.
+
+That member identifies the murderer: whoever the solved grid places at that location
+(or holding that weapon, or with that motive). The tool prints it as the accusation to
+make:
+
+```
+Accuse Uncle Midnight (a walking stick, the real estate office).
+  scene: housing flyers <- One of the locals's body was found beneath some housing flyers.
+```
+
+The final clue is only read this way when it produced no pairing, so an ordinary clue
+in last position is not mistaken for the murder scene.
+
 ## Development
 
 ```bash
@@ -178,5 +197,5 @@ uv run <command>   # run anything inside the project environment
   not covered there will be skipped rather than misread.
 - Comparative and ordering clues ("taller than", "north of") are not modelled, beyond
   "tallest" and "shortest".
-- The murder-scene clue ("the body was found beneath some housing flyers") is ignored;
-  it identifies the scene, not a grid pairing.
+- The accusation depends on the final clue resolving to a single member. If that clue
+  uses an unknown phrasing, the grid is still solved but no murderer is named.

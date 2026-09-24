@@ -490,9 +490,13 @@ def split_xor(
     return pairings
 
 
-def classify_clues(puzzle: Puzzle, router) -> tuple[list[Clue], list[str]]:
+def classify_clues(
+    puzzle: Puzzle,
+    router,
+    attributes: dict[str, dict[str, frozenset[str]]] | None = None,
+) -> tuple[list[Clue], list[str]]:
     """Turn each clue into pairings of members, with a polarity decided by Laya."""
-    attributes = build_attribute_index(puzzle)
+    attributes = build_attribute_index(puzzle) if attributes is None else attributes
     parsed: list[Clue] = []
     skipped: list[str] = []
 
@@ -618,6 +622,35 @@ def solve(puzzle: Puzzle, clues: list[Clue], max_drops: int = 2):
     return [], puzzle.categories[PEOPLE_CATEGORY], []
 
 
+def find_scene(
+    puzzle: Puzzle,
+    attributes: dict[str, dict[str, frozenset[str]]],
+    skipped: list[str],
+) -> Mention | None:
+    """The final clue names where/how the murder happened, which names the murderer.
+
+    Only a final clue that yielded no pairing is treated this way - otherwise it is an
+    ordinary grid clue.
+    """
+    if not puzzle.clues or puzzle.clues[-1] not in skipped:
+        return None
+    for mention in find_mentions(puzzle.clues[-1], puzzle.categories, attributes):
+        if len(mention.members) == 1:
+            return mention
+    return None
+
+
+def accuse(solution: dict[str, str], people: list[str], scene: Mention) -> str | None:
+    """The murderer is whoever the solution places at the murder scene."""
+    member = next(iter(scene.members))
+    if scene.category == PEOPLE_CATEGORY:
+        return member
+    for person in people:
+        if solution.get(_var(scene.category, person)) == member:
+            return person
+    return None
+
+
 def format_solution(solution: dict[str, str], people: list[str]) -> str:
     lines = []
     for person in people:
@@ -705,7 +738,9 @@ def main() -> None:
     from laya import Router
 
     router = Router(preload=not args.no_preload)
-    clues, skipped = classify_clues(puzzle, router)
+    attributes = build_attribute_index(puzzle)
+    clues, skipped = classify_clues(puzzle, router, attributes)
+    scene = find_scene(puzzle, attributes, skipped)
 
     print("\nClassified clues:")
     for clue in clues:
@@ -726,6 +761,17 @@ def main() -> None:
     else:
         print("Unique solution:")
     print(format_solution(solutions[0], people))
+
+    if scene:
+        murderer = accuse(solutions[0], people, scene)
+        if murderer:
+            items = ", ".join(
+                value
+                for key, value in sorted(solutions[0].items())
+                if key.endswith(f"::{murderer}")
+            )
+            print(f"\nAccuse {murderer} ({items}).")
+            print(f"  scene: {scene.label} <- {puzzle.clues[-1]}")
 
 
 if __name__ == "__main__":
