@@ -39,6 +39,12 @@ uv sync --extra render
 uv run playwright install chromium
 ```
 
+For the animated grid (`--gif`), install Pillow too:
+
+```bash
+uv sync --extra render --extra gif
+```
+
 ## Usage
 
 ```bash
@@ -47,10 +53,32 @@ uv run laya-murdle --render          # today's murdle, rendered in headless Chro
 uv run laya-murdle --file puzzle.html  # a page you saved yourself
 uv run laya-murdle --url <puzzle-url>
 uv run laya-murdle --no-preload      # lazy-load the Laya checkpoints
+uv run laya-murdle --render --gif    # animate the grid, one frame per clue
+uv run laya-murdle --render --gif path/to/my.gif   # ...to a specific file
 ```
 
+`--gif` without a path writes `output/murdle-YYYY-MM-DD.gif`. The `output/` folder is
+git-ignored.
+
 The command prints the parsed categories, each clue as Laya classified it (with its
-probability), and the solution found by the constraint solver.
+probability), the solution found by the constraint solver, the filled-in logic grid
+(murdle's notebook) and the accusation to make:
+
+```
+          |                WEAPONS                 |               LOCATIONS
+          |  laptop  snowglobe  chainsaw walking s |boutique  5-star re gift shop real esta
+--------------------------------------------------------------------------------------------
+Grandmast |    ·         ·         ✓         ·     |    ✓         ·         ·         ·
+Principal |    ✓         ·         ·         ·     |    ·         ✓         ·         ·
+Viscount  |    ·         ✓         ·         ·     |    ·         ·         ✓         ·
+Uncle Mid |    ·         ·         ·         ✓     |    ·         ·         ·         ✓
+--------------------------------------------------------------------------------------------
+laptop    |                                        |    ·         ✓         ·         ·
+snowglobe |                                        |    ·         ·         ✓         ·
+chainsaw  |                                        |    ✓         ·         ·         ·
+walking s |                                        |    ·         ·         ·         ✓
+--------------------------------------------------------------------------------------------
+```
 
 ### Why a plain fetch does not work
 
@@ -173,6 +201,19 @@ Accuse Uncle Midnight (a walking stick, the real estate office).
 The final clue is only read this way when it produced no pairing, so an ordinary clue
 in last position is not mistaken for the murder scene.
 
+### Animating the deduction
+
+`--gif` writes one frame per clue, showing the grid as it would look to a player who
+has read only the clues so far. Each frame re-solves the puzzle with the first *n*
+clues and enumerates every remaining solution: a cell is ticked when all of them agree
+the pair goes together, crossed when none do, and left blank while both are still
+possible. The caption counts the solutions still standing (576 → 216 → … → 1), so you
+can see which clue did the real work.
+
+This is not how the solver itself works — it solves in one shot. The animation is a
+replay, which is why it is cheap: the search space is a few hundred assignments, so
+re-solving once per clue costs nothing.
+
 ## Development
 
 ```bash
@@ -180,6 +221,28 @@ uv sync            # install/refresh the environment
 uv add <package>   # add a dependency (updates pyproject.toml + uv.lock)
 uv run <command>   # run anything inside the project environment
 ```
+
+### Layout
+
+| module | what it holds |
+| --- | --- |
+| `config.py` | the tunables, and the `config.toml` loader |
+| `models.py` | `Puzzle`, `Mention`, `Pairing`, `Clue` |
+| `sources.py` | fetching, headless rendering, DOM and text parsing |
+| `attributes.py` | card data to attribute phrases ("medium-weight", "bald") |
+| `clues.py` | mentions, Laya probes, XOR splitting, classification |
+| `solver.py` | variables, clue constraints, search, accusation |
+| `notebook.py` | the logic grid and the step-by-step deduction frames |
+| `animation.py` | GIF writing |
+| `cli.py` | argument parsing and the run itself |
+
+### Settings
+
+Every magic number lives in [config.toml](config.toml) — frame duration, the Laya
+confidence thresholds, how many clues the solver may drop, grid symbols and widths,
+fonts and colours, the output folder. The file is optional; delete a key (or the whole
+file) and the default from `config.py` is used. Point at a different one with
+`--config other.toml`.
 
 ## Notes
 

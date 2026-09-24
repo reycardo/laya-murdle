@@ -13,9 +13,10 @@ dependencies = [
 
 [project.optional-dependencies]
 render = ["playwright>=1.47"]
+gif = ["pillow>=10"]
 
 [project.scripts]
-laya-murdle = "laya_murdle.main:main"
+laya-murdle = "laya_murdle.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]

@@ -1,0 +1,39 @@
+# Settings for laya-murdle. Every key is optional; missing ones use the defaults
+# in src/laya_murdle/config.py.
+
+[fetch]
+url = "https://murdle.com"
+timeout = 20.0            # seconds, plain HTTP fetch
+render_timeout = 60.0     # seconds, headless Chromium
+fingerprint_wait_ms = 1000
+
+[laya]
+# A clue with a negation or third-party cue is read as negative unless Laya's averaged
+# probe score is at least `negated_override`. A clue without a cue is read as positive
+# unless the score is below `affirmed_floor`.
+negated_override = 0.90
+affirmed_floor = 0.10
+
+[solver]
+max_drops = 2             # least-confident clues to drop when the clues contradict
+
+[grid]
+name_width = 9            # characters per member label
+yes = "✓"
+no = "·"
+unknown = " "
+
+[gif]
+seconds = 6.0             # per frame
+final_hold = 2.5          # multiplier for the last frame
+font = "/System/Library/Fonts/Menlo.ttc"
+font_size = 15
+wrap = 78                 # characters before the clue text wraps
+margin = 20
+line_spacing = 1.9
+background = "#fdfdf7"
+title_color = "#b02020"
+grid_color = "#101010"
+
+[output]
+directory = "output"
