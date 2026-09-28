@@ -130,34 +130,86 @@ def render_puzzle(url: str, fetch: FetchConfig) -> Puzzle:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout)
             page.wait_for_selector("#evidence p strong", timeout=timeout)
             payload = page.evaluate(EXTRACT_JS)
-            owner = _resolve_fingerprint(
-                page, payload["details"].get("suspects", {}), fetch.fingerprint_wait_ms
+            owner, clues = _resolve_evidence_links(
+                page,
+                payload["clues"],
+                payload["categories"],
+                payload["details"].get("suspects", {}),
+                fetch.reveal_wait_ms,
             )
         finally:
             browser.close()
 
-    clues = payload["clues"]
     if owner:
         clues = [re.sub(r"This fingerprint", f"{owner}'s fingerprint", c) for c in clues]
 
     return Puzzle(categories=payload["categories"], clues=clues, details=payload["details"])
 
 
-def _resolve_fingerprint(page, suspects: dict[str, dict], wait_ms: int) -> str | None:
-    """Open the fingerprint evidence page and match the print against the suspects."""
-    link = page.query_selector("#evidence object a")
-    if not link:
-        return None
-    link.click()
-    page.wait_for_timeout(wait_ms)
-    found = page.evaluate(FOUND_PRINT_JS)
-    if not found:
-        return None
-    filename = found.rsplit("/", 1)[-1]
-    for name, characteristics in suspects.items():
-        if characteristics.get("print") == filename:
-            return name
-    return None
+# A clue can hide a second, nested link inside its evidence-link anchor - e.g. a real
+# fingerprint print, or a quoted phrase like "...famous 'unauthorized autobiography'."
+# Clicking it swaps the whole page for a reveal (a print image, or a book excerpt) that
+# names what the clue text itself never states outright.
+EVIDENCE_LINK_SELECTOR = "#evidence strong a a"
+
+BACK_BUTTON_SELECTOR = "input[value='BACK TO MAIN']"
+
+
+def _match_member(text: str, categories: dict[str, list[str]]) -> str | None:
+    """The longest category member named in the text, e.g. an excerpt naming a location."""
+    lowered = text.lower()
+    best: str | None = None
+    for members in categories.values():
+        for member in members:
+            if re.search(rf"\b{re.escape(member.lower())}\b", lowered) and (
+                best is None or len(member) > len(best)
+            ):
+                best = member
+    return best
+
+
+def _resolve_evidence_links(
+    page,
+    clues: list[str],
+    categories: dict[str, list[str]],
+    suspects: dict[str, dict],
+    wait_ms: int,
+) -> tuple[str | None, list[str]]:
+    """Click each nested evidence link once, reading a print reveal or an excerpt reveal."""
+    clues = list(clues)
+    owner: str | None = None
+    count = len(page.query_selector_all(EVIDENCE_LINK_SELECTOR))
+
+    for _ in range(count):
+        links = page.query_selector_all(EVIDENCE_LINK_SELECTOR)
+        if not links:
+            break
+        link = links[0]
+        index = link.evaluate(
+            "el => Array.prototype.indexOf.call("
+            "document.querySelectorAll('#evidence strong'), el.closest('strong'))"
+        )
+        link.click()
+        page.wait_for_timeout(wait_ms)
+
+        found_print = page.evaluate(FOUND_PRINT_JS)
+        if found_print:
+            filename = found_print.rsplit("/", 1)[-1]
+            for name, characteristics in suspects.items():
+                if characteristics.get("print") == filename:
+                    owner = name
+                    break
+        else:
+            member = _match_member(page.inner_text("body"), categories)
+            if member and 0 <= index < len(clues):
+                clues[index] = f"{clues[index]} (This coincidentally refers to {member}.)"
+
+        back = page.query_selector(BACK_BUTTON_SELECTOR)
+        if back:
+            back.click()
+            page.wait_for_timeout(wait_ms)
+
+    return owner, clues
 
 
 def html_to_text(html: str) -> str:

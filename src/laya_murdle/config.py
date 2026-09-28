@@ -14,7 +14,7 @@ class FetchConfig:
     url: str = "https://murdle.com"
     timeout: float = 20.0
     render_timeout: float = 60.0
-    fingerprint_wait_ms: int = 1000
+    reveal_wait_ms: int = 1000
 
 
 @dataclass
