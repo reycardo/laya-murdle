@@ -7,6 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from laya_murdle.anagrams import decode_anagrams
 from laya_murdle.animation import write_gif
 from laya_murdle.attributes import build_attribute_index
 from laya_murdle.clues import classify_clues, describe, find_scene
@@ -97,10 +98,14 @@ def main() -> None:
         print(f"  {category}: {', '.join(members)}")
     print(f"  clues: {len(puzzle.clues)}")
 
+    attributes = build_attribute_index(puzzle)
+    puzzle, decoded = decode_anagrams(puzzle, attributes, config.anagram)
+    for original, text in decoded:
+        print(f"  [anagram] {original}\n         -> {text}")
+
     from laya import Router
 
     router = Router(preload=not args.no_preload)
-    attributes = build_attribute_index(puzzle)
     clues, skipped = classify_clues(puzzle, router, attributes, config.laya)
     scene = find_scene(puzzle, attributes, skipped)
 

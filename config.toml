@@ -14,6 +14,13 @@ reveal_wait_ms = 1000     # pause after clicking an evidence link (fingerprint, 
 negated_override = 0.90
 affirmed_floor = 0.10
 
+[anagram]
+# Notes like "HTE LLSME FO NOLMASD" are unscrambled word by word against the puzzle's
+# own words, a built-in list of common words, then this word list.
+dictionary = "/usr/share/dict/words"
+min_words = 3             # upper-case words in a row before it may be a scrambled note
+scrambled_share = 0.5     # ...and the share of them that must not be real words
+
 [solver]
 max_drops = 2             # least-confident clues to drop when the clues contradict
 

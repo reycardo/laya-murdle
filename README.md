@@ -178,6 +178,17 @@ The daily murdle does not only use plain "X was in Y" clues:
 - **Third-party clues** ("Uncle Midnight was flirting with the person who had a
   chainsaw") imply that Midnight is *not* that person. A named suspect plus a
   third-party phrase ("the person who", "whoever", …) is treated like a negation cue.
+- **Anagram clues** ("…a note that read: HTE LLSME FO NOLMASD WSA SECROVDIED EIDHBN A
+  ENCEMT RUTCK.") scramble every word of a message. Two words are anagrams exactly when
+  their sorted letters match ("hte" and "the" are both "eht"), so every known word is
+  indexed by its sorted letters and each scrambled word is looked up by its own. When
+  several words fit, the puzzle's own words win (member names and attribute terms, so a
+  scrambled "LACHPE" becomes CHAPEL when the chapel is a location), then a built-in list
+  of common words (WSA is "was", not "saw"), then the system word list. That list has
+  few inflections, so a word with no match is retried without a plural or past-tense
+  ending ("almond" + "s"). A run of three or more upper-case words is only decoded when
+  most of them are not real words, and the decoded clue replaces the original before
+  Laya sees it.
 
 Attribute clues need the scraped card data, so they only work with `--render`. With
 `--file` or a plain `.txt` puzzle they are reported as skipped.
@@ -220,6 +231,7 @@ re-solving once per clue costs nothing.
 uv sync            # install/refresh the environment
 uv add <package>   # add a dependency (updates pyproject.toml + uv.lock)
 uv run <command>   # run anything inside the project environment
+uv run pytest      # run the tests
 ```
 
 ### Layout
@@ -230,6 +242,7 @@ uv run <command>   # run anything inside the project environment
 | `models.py` | `Puzzle`, `Mention`, `Pairing`, `Clue` |
 | `sources.py` | fetching, headless rendering, DOM and text parsing |
 | `attributes.py` | card data to attribute phrases ("medium-weight", "bald") |
+| `anagrams.py` | unscrambling anagram notes ("HTE LLSME" → "THE SMELL") |
 | `clues.py` | mentions, Laya probes, XOR splitting, classification |
 | `solver.py` | variables, clue constraints, search, accusation |
 | `notebook.py` | the logic grid and the step-by-step deduction frames |
@@ -260,5 +273,10 @@ file) and the default from `config.py` is used. Point at a different one with
   not covered there will be skipped rather than misread.
 - Comparative and ordering clues ("taller than", "north of") are not modelled, beyond
   "tallest" and "shortest".
+- Anagram notes are unscrambled one word at a time, with no context: when two common
+  words share their letters (ON and NO) the more frequent one wins. The CLI prints each
+  decoding as `[anagram]` so a misread is visible. The default word list is macOS's
+  `/usr/share/dict/words`; set `[anagram] dictionary` elsewhere, or only the puzzle's
+  words and the built-in common words are used.
 - The accusation depends on the final clue resolving to a single member. If that clue
   uses an unknown phrasing, the grid is still solved but no murderer is named.

@@ -26,6 +26,15 @@ class LayaConfig:
 
 
 @dataclass
+class AnagramConfig:
+    dictionary: str = "/usr/share/dict/words"
+    # A run of at least this many upper-case words may be a scrambled note...
+    min_words: int = 3
+    # ...and is one when at least this share of its words are not real words.
+    scrambled_share: float = 0.5
+
+
+@dataclass
 class SolverConfig:
     max_drops: int = 2
 
@@ -61,6 +70,7 @@ class OutputConfig:
 class Config:
     fetch: FetchConfig = field(default_factory=FetchConfig)
     laya: LayaConfig = field(default_factory=LayaConfig)
+    anagram: AnagramConfig = field(default_factory=AnagramConfig)
     solver: SolverConfig = field(default_factory=SolverConfig)
     grid: GridConfig = field(default_factory=GridConfig)
     gif: GifConfig = field(default_factory=GifConfig)
