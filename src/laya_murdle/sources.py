@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 import httpx
@@ -9,6 +10,8 @@ from bs4 import BeautifulSoup
 
 from laya_murdle.config import FetchConfig
 from laya_murdle.models import PEOPLE_CATEGORY, Puzzle
+
+log = logging.getLogger(__name__)
 
 CATEGORY_HEADERS = {
     "suspects": "suspects",
@@ -107,6 +110,7 @@ FOUND_PRINT_JS = """() => {
 
 def fetch_puzzle_html(url: str, timeout: float) -> str:
     response = httpx.get(url, timeout=timeout, follow_redirects=True)
+    log.debug("GET %s -> %d, %d bytes", response.url, response.status_code, len(response.text))
     response.raise_for_status()
     return response.text
 
@@ -128,8 +132,18 @@ def render_puzzle(url: str, fetch: FetchConfig) -> Puzzle:
         try:
             page = browser.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            log.debug("page loaded, waiting for the clue list")
             page.wait_for_selector("#evidence p strong", timeout=timeout)
             payload = page.evaluate(EXTRACT_JS)
+            log.debug(
+                "page lists %s; %d clues",
+                ", ".join(f"{len(m)} {c}" for c, m in payload["categories"].items()),
+                len(payload["clues"]),
+            )
+            log.debug(
+                "card data for %s",
+                ", ".join(f"{len(d)} {c}" for c, d in payload["details"].items()),
+            )
             owner, clues = _resolve_evidence_links(
                 page,
                 payload["clues"],
@@ -179,6 +193,7 @@ def _resolve_evidence_links(
     clues = list(clues)
     owner: str | None = None
     count = len(page.query_selector_all(EVIDENCE_LINK_SELECTOR))
+    log.debug("%d nested evidence links", count)
 
     for _ in range(count):
         links = page.query_selector_all(EVIDENCE_LINK_SELECTOR)
@@ -198,9 +213,13 @@ def _resolve_evidence_links(
             for name, characteristics in suspects.items():
                 if characteristics.get("print") == filename:
                     owner = name
+                    log.debug("clue %d: print %s is %s's", index + 1, filename, name)
                     break
+            else:
+                log.debug("clue %d: print %s matches no suspect", index + 1, filename)
         else:
             member = _match_member(page.inner_text("body"), categories)
+            log.debug("clue %d: reveal names %s", index + 1, member or "no member")
             if member and 0 <= index < len(clues):
                 clues[index] = f"{clues[index]} (This coincidentally refers to {member}.)"
 
@@ -242,6 +261,11 @@ def parse_murdle_dom(html: str) -> Puzzle | None:
 
     if puzzle.categories.get(PEOPLE_CATEGORY) and puzzle.clues:
         return puzzle
+    log.debug(
+        "DOM has %d category dropdowns and %d evidence bullets",
+        len(puzzle.categories),
+        len(puzzle.clues),
+    )
     return None
 
 
@@ -282,10 +306,14 @@ def parse_puzzle(text: str) -> Puzzle:
                 continue
             if len(line) > 10:
                 puzzle.clues.append(line)
+            else:
+                log.debug("too short for a clue: %r", line)
             continue
 
         if current and _looks_like_item(line):
             if line not in puzzle.categories[current]:
                 puzzle.categories[current].append(line)
+        elif current:
+            log.debug("not a %s member: %r", current.removesuffix("s"), line)
 
     return puzzle

@@ -24,6 +24,8 @@ class Mention:
     members: frozenset[str]
     label: str
     named: bool
+    # Laya's probability, when Laya rather than the clue text picked this member.
+    guessed: float | None = None
 
 
 @dataclass(frozen=True)

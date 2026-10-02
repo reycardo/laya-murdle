@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from laya_murdle.config import GridConfig
 from laya_murdle.models import PEOPLE_CATEGORY, Clue, Puzzle
 from laya_murdle.solver import build_problem, var_name
+
+log = logging.getLogger(__name__)
 
 
 def format_solution(solution: dict[str, str], people: list[str]) -> str:
@@ -115,7 +118,9 @@ def deduction_frames(
     for step in range(len(clues) + 1):
         problem, _ = build_problem(puzzle, clues[:step])
         solutions = problem.getSolutions()
+        log.debug("frame %d/%d: %d solutions", step, len(clues), len(solutions))
         if not solutions:
+            log.debug("clues 1-%d contradict, so the animation stops there", step)
             break
 
         owners = [owners_of(puzzle, solution, people) for solution in solutions]

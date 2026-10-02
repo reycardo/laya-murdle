@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 CONFIG_FILENAME = "config.toml"
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -23,6 +26,8 @@ class LayaConfig:
     negated_override: float = 0.90
     # A clue without one is read as positive unless Laya is this sure otherwise.
     affirmed_floor: float = 0.10
+    # When the text names nothing it can pair, a member Laya picks needs this probability.
+    reference_floor: float = 0.50
 
 
 @dataclass
@@ -94,13 +99,22 @@ def load_config(path: Path | None = None) -> Config:
     config = Config()
     for candidate in _candidates(path):
         if not candidate.is_file():
+            log.debug("no settings at %s", candidate)
             continue
+        log.debug("settings from %s", candidate)
         data = tomllib.loads(candidate.read_text(encoding="utf-8"))
+        sections = {section.name for section in fields(config)}
+        for name in data.keys() - sections:
+            log.debug("ignoring unknown section [%s]", name)
         for section in fields(config):
             target = getattr(config, section.name)
             known = {entry.name for entry in fields(target)}
             for key, value in (data.get(section.name) or {}).items():
                 if key in known:
                     setattr(target, key, value)
+                else:
+                    log.debug("ignoring unknown setting [%s] %s", section.name, key)
         break
+    else:
+        log.debug("using the default settings")
     return config

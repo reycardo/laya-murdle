@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from laya_murdle.models import Puzzle
+
+log = logging.getLogger(__name__)
 
 ROLE_TERMS = {
     "clergy": ("clergy", "religious"),
@@ -93,6 +97,12 @@ def build_attribute_index(puzzle: Puzzle) -> dict[str, dict[str, frozenset[str]]
         ordered = sorted(heights, key=lambda name: int(heights[name]))
         index.setdefault("suspects", {}).setdefault("shortest", set()).add(ordered[0])
         index.setdefault("suspects", {}).setdefault("tallest", set()).add(ordered[-1])
+
+    if not index:
+        log.debug("no card data, so no attribute terms")
+    for category, terms in index.items():
+        for term, names in sorted(terms.items()):
+            log.debug("%s %r: %s", category, term, ", ".join(sorted(names)))
 
     return {
         category: {term: frozenset(names) for term, names in terms.items()}

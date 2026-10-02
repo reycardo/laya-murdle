@@ -18,8 +18,10 @@ The pipeline has two stages:
 - [uv](https://docs.astral.sh/uv/) (`brew install uv`)
 - Python 3.12+ (uv will fetch it if needed)
 
-Laya's model weights are **not** bundled with the package. They are downloaded from
-Hugging Face on first use and cached locally (`~/.cache/huggingface`).
+Laya's model weights are **not** bundled with the package. Only the English checkpoint
+is used (about 0.8 GB). It is downloaded from Hugging Face on the first run and cached
+in `~/.cache/huggingface`; every later run loads it straight from that folder, with no
+network calls at all.
 
 ## Setup
 
@@ -52,13 +54,27 @@ uv run laya-murdle --sample          # built-in puzzle, good for a smoke test
 uv run laya-murdle --render          # today's murdle, rendered in headless Chromium
 uv run laya-murdle --file puzzle.html  # a page you saved yourself
 uv run laya-murdle --url <puzzle-url>
-uv run laya-murdle --no-preload      # lazy-load the Laya checkpoints
+uv run laya-murdle --no-preload      # load the Laya checkpoint on first use
 uv run laya-murdle --render --gif    # animate the grid, one frame per clue
 uv run laya-murdle --render --gif path/to/my.gif   # ...to a specific file
+uv run laya-murdle --render -v       # debug output on stderr
 ```
 
 `--gif` without a path writes `output/murdle-YYYY-MM-DD.gif`. The `output/` folder is
 git-ignored.
+
+`-v` / `--verbose` prints what each stage decided: the settings file, the scraped card
+data and attribute terms, each anagram decision, the mentions found in every clue,
+Laya's individual probe scores and reference picks, the polarity threshold applied, and
+each solver attempt. Lines are prefixed with the milliseconds since start and the module
+they come from:
+
+```
+   9073ms clues      clue 2: The Candlestick was in the Greenhouse.
+   9073ms clues        mentions: weapons:Candlestick, locations:Greenhouse
+   9297ms clues        probes: pair=0.77 linked=0.19 was_with=0.17 ruled_out=1-0.19 -> 0.49
+   9297ms clues        no cues: 0.49 >= 0.10 -> affirms
+```
 
 The command prints the parsed categories, each clue as Laya classified it (with its
 probability), the solution found by the constraint solver, the filled-in logic grid
@@ -97,11 +113,10 @@ in the accusation dropdowns (`select#suspect`, `#weapon`, `#room`, `#motive`) an
 clues are the bullets inside `#evidence`. A plain `.txt` file with `SUSPECTS` /
 `WEAPONS` / `LOCATIONS` / `CLUES` headings also works.
 
-To pre-download the Laya checkpoints instead of lazy-loading them on the first
-question:
+To download the Laya checkpoint ahead of the first run:
 
 ```bash
-uv run python -c "from laya import Router; Router(preload=True)"
+uv run python -c "from laya_murdle.checkpoint import load_router; load_router()"
 ```
 
 ## How it works
@@ -126,14 +141,44 @@ questions = {
     "ruled_out": {"type": "noul", "instructions": "The clue rules out the claim. Claim: Dr. Crimson and Library are together."},
 }
 
-answers = router.predict({"clue": clue}, questions)["answers"]
+answers = router.predict({"clue": clue}, questions, model="english")["answers"]
 ```
+
+`model="english"` pins the checkpoint: Laya's Router otherwise picks one per request
+from the script it detects, and could load the multilingual one for a clue with an
+accented name.
 
 The averaged score is combined with a lexical negation cue (`not`, `never`, `neither`,
 `other than`, …): a clue containing a negation is read as negative unless Laya is
 overwhelmingly confident otherwise, and a clue without one is read as positive unless
-Laya is confident otherwise. Clues that mention fewer than two categories (ordering or
-comparison clues, for example) are reported as skipped.
+Laya is confident otherwise.
+
+### When the text names nothing
+
+Exact matching misses shortened names ("Slate" for Captain Slate, "the truck" for the
+cement truck) and descriptions ("the clergyman"). When a clue's text gives no pairing,
+Laya is asked what it refers to — one `choice` per category, in one call:
+
+```python
+"suspects": {"type": "choice",
+             "instructions": "Which suspect is named or described in the clue?",
+             "criteria": {"Brother Brownstone": "the clue is about Brother Brownstone (clergy, brown hair)",
+                          ...,
+                          "none": "no suspect is mentioned"}},
+```
+
+Each option carries the member's card terms when `--render` scraped them, which is what
+lets Laya resolve a description. A pick counts only at `reference_floor` (0.5) or above,
+and fills only the categories the text did not already name. Since a guess is less
+certain than an exact match, the clue's confidence is multiplied by Laya's probability,
+so the solver drops it first if the clues contradict. The output marks it:
+
+```
+  [0.41] Chapel = Captain Slate  <- Slate was in the Chapel.  [laya read Captain Slate: 0.73]
+```
+
+The last clue is left alone (it usually names the murder scene, see below), and clues
+Laya cannot place either are reported as skipped.
 
 ### Solving with constraints
 
@@ -191,7 +236,8 @@ The daily murdle does not only use plain "X was in Y" clues:
   Laya sees it.
 
 Attribute clues need the scraped card data, so they only work with `--render`. With
-`--file` or a plain `.txt` puzzle they are reported as skipped.
+`--file` or a plain `.txt` puzzle they are left to Laya's reference guess, which has no
+card terms to go on, and are usually skipped.
 
 ### Naming the murderer
 
@@ -199,6 +245,10 @@ The last clue is not a grid clue: it says where the body was found, or what kill
 victim ("One of the locals's body was found beneath some housing flyers"). It resolves
 to exactly one member — here the real estate office — and gives no pairing, so it falls
 out of the clue loop as skipped.
+
+If the text names no single member ("…found next to the truck"), Laya is asked the same
+reference question, ignoring suspects, since a guessed suspect would name the murderer
+without the grid.
 
 That member identifies the murderer: whoever the solved grid places at that location
 (or holding that weapon, or with that motive). The tool prints it as the accusation to
@@ -243,7 +293,8 @@ uv run pytest      # run the tests
 | `sources.py` | fetching, headless rendering, DOM and text parsing |
 | `attributes.py` | card data to attribute phrases ("medium-weight", "bald") |
 | `anagrams.py` | unscrambling anagram notes ("HTE LLSME" → "THE SMELL") |
-| `clues.py` | mentions, Laya probes, XOR splitting, classification |
+| `checkpoint.py` | loading only the English Laya checkpoint, from the cache when it is there |
+| `clues.py` | mentions, Laya probes and reference guesses, XOR splitting, classification |
 | `solver.py` | variables, clue constraints, search, accusation |
 | `notebook.py` | the logic grid and the step-by-step deduction frames |
 | `animation.py` | GIF writing |
@@ -273,6 +324,9 @@ file) and the default from `config.py` is used. Point at a different one with
   not covered there will be skipped rather than misread.
 - Comparative and ordering clues ("taller than", "north of") are not modelled, beyond
   "tallest" and "shortest".
+- Laya's reference guesses are noisy. In testing it resolved shortened names and card
+  descriptions well, but often answered "none" for negated clues and loose wordings
+  ("the poison"); those stay skipped.
 - Anagram notes are unscrambled one word at a time, with no context: when two common
   words share their letters (ON and NO) the more frequent one wins. The CLI prints each
   decoding as `[anagram]` so a misread is visible. The default word list is macOS's

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import replace
 from functools import lru_cache
@@ -43,6 +44,8 @@ PROSE_WORD = re.compile(r"\b[A-Za-z]*[a-z][A-Za-z]*\b")
 
 Index = dict[str, list[str]]
 
+log = logging.getLogger(__name__)
+
 
 def signature(word: str) -> str:
     """Anagrams share their sorted letters: 'hte' and 'the' are both 'eht'."""
@@ -60,6 +63,7 @@ def load_dictionary(path: str) -> Index:
     """Index a word list by signature. A missing file gives an empty index."""
     file = Path(path).expanduser()
     if not file.is_file():
+        log.debug("no word list at %s", file)
         return {}
     words = [word for word in file.read_text(errors="ignore").split() if word.isalpha()]
     # Capitalised entries are mostly proper nouns ("Fo", "Het"), so they rank last.
@@ -67,6 +71,7 @@ def load_dictionary(path: str) -> Index:
     index: Index = {}
     for word in words:
         _add(index, word.lower())
+    log.debug("%d words from %s", len(words), file)
     return index
 
 
@@ -123,6 +128,10 @@ def _is_word(word: str, vocabulary: Index, dictionary: Index) -> bool:
 def _unscramble(word: str, vocabulary: Index, dictionary: Index) -> str:
     stem, rest = _stem(word)
     found = candidates(stem, vocabulary, dictionary)
+    if len(found) > 1:
+        log.debug("  %s: %s", stem, ", ".join(found))
+    elif not found:
+        log.debug("  %s: no known word, kept", stem)
     return found[0].upper() + rest if found else word
 
 
@@ -133,7 +142,14 @@ def decode_clue(text: str, vocabulary: Index, dictionary: Index, config: Anagram
         run = match.group()
         words = UPPER_WORD.findall(run)
         unknown = sum(not _is_word(word, vocabulary, dictionary) for word in words)
-        if len(words) < config.min_words or unknown < config.scrambled_share * len(words):
+        scrambled = (
+            len(words) >= config.min_words and unknown >= config.scrambled_share * len(words)
+        )
+        log.debug(
+            "%r: %d of %d not words -> %s",
+            run, unknown, len(words), "unscramble" if scrambled else "keep",
+        )
+        if not scrambled:
             return run
         return UPPER_WORD.sub(
             lambda word: _unscramble(word.group(), vocabulary, dictionary), run

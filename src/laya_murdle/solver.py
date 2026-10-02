@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 from constraint import AllDifferentConstraint, Problem
 
 from laya_murdle.models import PEOPLE_CATEGORY, Clue, Mention, Pairing, Puzzle
+
+log = logging.getLogger(__name__)
 
 
 def var_name(category: str, person: str) -> str:
@@ -79,11 +83,19 @@ def build_problem(puzzle: Puzzle, clues: list[Clue]) -> tuple[Problem, list[str]
 
 def solve(puzzle: Puzzle, clues: list[Clue], max_drops: int = 2):
     """Solve, dropping the least confident clues if the clue set is contradictory."""
+    people = puzzle.categories[PEOPLE_CATEGORY]
+    for clue in clues:
+        if any(_pairing_predicate(pairing, people) is None for pairing in clue.pairings):
+            log.debug("no constraint fits, ignored: %s", clue.text)
     ranked = sorted(clues, key=lambda clue: clue.confidence)
     for dropped in range(max_drops + 1):
+        if 0 < dropped <= len(ranked):
+            weakest = ranked[dropped - 1]
+            log.debug("contradiction, dropping [%.2f] %s", weakest.confidence, weakest.text)
         kept = ranked[dropped:]
         problem, people = build_problem(puzzle, kept)
         solutions = problem.getSolutions()
+        log.debug("%d clues -> %d solutions", len(kept), len(solutions))
         if solutions:
             return solutions, people, ranked[:dropped]
     return [], puzzle.categories[PEOPLE_CATEGORY], []
@@ -97,4 +109,5 @@ def accuse(solution: dict[str, str], people: list[str], scene: Mention) -> str |
     for person in people:
         if solution.get(var_name(scene.category, person)) == member:
             return person
+    log.debug("nobody holds %s in the solution", member)
     return None

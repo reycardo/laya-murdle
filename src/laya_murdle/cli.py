@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from datetime import date
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 from laya_murdle.anagrams import decode_anagrams
 from laya_murdle.animation import write_gif
 from laya_murdle.attributes import build_attribute_index
+from laya_murdle.checkpoint import load_router
 from laya_murdle.clues import classify_clues, describe, find_scene
 from laya_murdle.config import Config, load_config
 from laya_murdle.models import PEOPLE_CATEGORY, Puzzle
@@ -24,24 +26,36 @@ from laya_murdle.sources import (
     render_puzzle,
 )
 
+# Not __name__, which is "__main__" under `python -m` and would sit outside the package logger.
+log = logging.getLogger("laya_murdle.cli")
+
 
 def load_puzzle(args: argparse.Namespace, config: Config) -> Puzzle:
     if args.sample:
+        log.debug("source: the built-in sample puzzle")
         return parse_puzzle(SAMPLE_PUZZLE)
 
     url = args.url or config.fetch.url
 
     if args.render and not args.file:
+        log.debug("source: %s, rendered in headless Chromium", url)
         return render_puzzle(url, config.fetch)
 
     if args.file:
         raw = Path(args.file).read_text(encoding="utf-8")
         if not args.file.endswith((".html", ".htm")):
+            log.debug("source: %s, read as plain text", args.file)
             return parse_puzzle(raw)
+        log.debug("source: %s, read as a saved page", args.file)
     else:
+        log.debug("source: %s, plain HTTP fetch", url)
         raw = fetch_puzzle_html(url, config.fetch.timeout)
 
-    return parse_murdle_dom(raw) or parse_puzzle(html_to_text(raw))
+    puzzle = parse_murdle_dom(raw)
+    if puzzle is None:
+        log.debug("no murdle DOM in the page; falling back to the text parser")
+        puzzle = parse_puzzle(html_to_text(raw))
+    return puzzle
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-preload",
         action="store_true",
-        help="lazy-load Laya checkpoints instead of preloading them",
+        help="load the Laya checkpoint on first use instead of up front",
     )
     parser.add_argument(
         "--gif",
@@ -67,7 +81,23 @@ def parse_args() -> argparse.Namespace:
         help="write an animated grid, one frame per clue (needs the 'gif' extra)",
     )
     parser.add_argument("--config", type=Path, help="settings file (default: config.toml)")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="print debug output to stderr"
+    )
     return parser.parse_args()
+
+
+def configure_logging(verbose: bool) -> None:
+    """Debug output for this package only; httpx, Hugging Face etc. stay quiet."""
+    if not verbose:
+        return
+    # Keep the debug lines (stderr) in order with the results when both are piped.
+    sys.stdout.reconfigure(line_buffering=True)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(relativeCreated)7.0fms %(module)-10s %(message)s"))
+    package = logging.getLogger("laya_murdle")
+    package.addHandler(handler)
+    package.setLevel(logging.DEBUG)
 
 
 def gif_path(requested: str, config: Config) -> Path:
@@ -78,6 +108,7 @@ def gif_path(requested: str, config: Config) -> Path:
 
 def main() -> None:
     args = parse_args()
+    configure_logging(args.verbose)
     config = load_config(args.config)
 
     puzzle = load_puzzle(args, config)
@@ -103,11 +134,9 @@ def main() -> None:
     for original, text in decoded:
         print(f"  [anagram] {original}\n         -> {text}")
 
-    from laya import Router
-
-    router = Router(preload=not args.no_preload)
+    router = load_router(preload=not args.no_preload)
     clues, skipped = classify_clues(puzzle, router, attributes, config.laya)
-    scene = find_scene(puzzle, attributes, skipped)
+    scene = find_scene(puzzle, attributes, skipped, router, config.laya)
 
     print("\nClassified clues:")
     for clue in clues:
@@ -144,7 +173,8 @@ def main() -> None:
             )
             accusation = f"Accuse {murderer} ({items})."
             print(f"\n{accusation}")
-            print(f"  scene: {scene.label} <- {puzzle.clues[-1]}")
+            read = f" (laya read, {scene.guessed:.2f})" if scene.guessed is not None else ""
+            print(f"  scene: {scene.label}{read} <- {puzzle.clues[-1]}")
 
     if args.gif is not None:
         path = gif_path(args.gif, config)

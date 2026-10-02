@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import textwrap
 from pathlib import Path
 
 from laya_murdle.config import GifConfig
+
+log = logging.getLogger(__name__)
 
 
 def write_gif(frames: list[tuple[str, str]], path: Path, gif: GifConfig = GifConfig()) -> None:
@@ -18,6 +21,7 @@ def write_gif(frames: list[tuple[str, str]], path: Path, gif: GifConfig = GifCon
         font = ImageFont.truetype(gif.font, gif.font_size)
         bold = ImageFont.truetype(gif.font, gif.font_size, index=1)
     except OSError:
+        log.debug("cannot load font %s, using Pillow's default", gif.font)
         font = bold = ImageFont.load_default()
 
     pages = []
@@ -35,6 +39,7 @@ def write_gif(frames: list[tuple[str, str]], path: Path, gif: GifConfig = GifCon
     char_w = box[2] - box[0] + 1
     char_h = int((box[3] - box[1]) * gif.line_spacing)
     size = (columns * char_w + 2 * gif.margin, rows * char_h + 2 * gif.margin)
+    log.debug("%d frames at %dx%d px", len(pages), *size)
 
     images = []
     for wrapped, grid in pages:

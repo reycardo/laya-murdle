@@ -13,6 +13,9 @@ reveal_wait_ms = 1000     # pause after clicking an evidence link (fingerprint, 
 # unless the score is below `affirmed_floor`.
 negated_override = 0.90
 affirmed_floor = 0.10
+# A clue whose text names nothing to pair is put to Laya ("which suspect is named or
+# described?"). Its pick is used only at this probability or above; above 1 turns it off.
+reference_floor = 0.50
 
 [anagram]
 # Notes like "HTE LLSME FO NOLMASD" are unscrambled word by word against the puzzle's
